@@ -1,0 +1,89 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      # The files may have been uploaded without their folders: put every file where the build expects it.
+      - name: Arrange the files
+        run: |
+          python3 - <<'PY'
+          import os, shutil, struct, sys
+          if os.path.isdir("app/src/main"):
+              shutil.copytree(".", "proj", ignore=shutil.ignore_patterns(".git", "proj"))
+              sys.exit(0)
+          J = "proj/app/src/main"
+          sizes = {48: "mdpi", 72: "hdpi", 96: "xhdpi", 144: "xxhdpi", 192: "xxxhdpi"}
+          placed = {}
+          for name in sorted(os.listdir(".")):
+              if not os.path.isfile(name):
+                  continue
+              raw = open(name, "rb").read()
+              text = raw.decode("utf-8", "replace")
+              low, to = name.lower(), None
+              if low.endswith(".gradle"):
+                  if "namespace" in text: to = "proj/app/build.gradle"
+                  elif "pluginManagement" in text: to = "proj/settings.gradle"
+                  elif "apply false" in text: to = "proj/build.gradle"
+              elif low.endswith(".properties"): to = "proj/gradle.properties"
+              elif low.endswith(".keystore"): to = "proj/app/easycentral.keystore"
+              elif low.endswith(".java"): to = J + "/java/com/easycentral/bot/MainActivity.java"
+              elif low.endswith(".html"): to = J + "/assets/index.html"
+              elif low.endswith(".png") and raw[:4] == b"\x89PNG":
+                  width = struct.unpack(">I", raw[16:20])[0]
+                  if width in sizes: to = J + "/res/mipmap-%s/ic_launcher.png" % sizes[width]
+              elif low.endswith(".xml"):
+                  if "<manifest" in text: to = J + "/AndroidManifest.xml"
+                  elif "<style" in text: to = J + "/res/values/styles.xml"
+                  elif "<string" in text: to = J + "/res/values/strings.xml"
+              if to:
+                  os.makedirs(os.path.dirname(to), exist_ok=True)
+                  open(to, "wb").write(raw)
+                  placed[to] = name
+          for to, name in sorted(placed.items()):
+              print("%-28s -> %s" % (name, to))
+          need = ["proj/app/build.gradle", "proj/settings.gradle", "proj/build.gradle", "proj/app/easycentral.keystore",
+                  J + "/java/com/easycentral/bot/MainActivity.java", J + "/assets/index.html", J + "/AndroidManifest.xml",
+                  J + "/res/values/styles.xml", J + "/res/values/strings.xml", J + "/res/mipmap-mdpi/ic_launcher.png",
+                  J + "/res/mipmap-hdpi/ic_launcher.png", J + "/res/mipmap-xhdpi/ic_launcher.png",
+                  J + "/res/mipmap-xxhdpi/ic_launcher.png", J + "/res/mipmap-xxxhdpi/ic_launcher.png"]
+          missing = [n for n in need if n not in placed]
+          if missing:
+              sys.exit("MISSING FILES: " + ", ".join(missing))
+          PY
+
+      - name: Build the app
+        run: gradle -p proj assembleRelease --no-daemon --stacktrace
+
+      - name: Name the file
+        run: cp proj/app/build/outputs/apk/release/app-release.apk EasyCentralBot.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EasyCentralBot-apk
+          path: EasyCentralBot.apk
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: EasyCentral Bot v${{ github.run_number }}
+          files: EasyCentralBot.apk
